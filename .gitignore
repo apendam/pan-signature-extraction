@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+*.key.json
+service-account*.json
+
+# Never commit real PAN images or extracted signatures - see README.
+/sample_images/
+/output/
