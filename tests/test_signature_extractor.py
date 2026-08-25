@@ -2,7 +2,11 @@ import cv2
 import numpy as np
 
 from pan_signature.config import ExtractorConfig
-from pan_signature.signature_extractor import refine_and_crop
+from pan_signature.signature_extractor import (
+    orient_horizontal,
+    refine_and_crop,
+    whiten_background,
+)
 from pan_signature.signature_locator import BBox
 
 
@@ -73,3 +77,50 @@ def test_keeps_blue_ink_when_exclusion_is_disabled():
     refined_crop, refined_bbox = refine_and_crop(image, roi, config)
 
     assert refined_bbox.x1 > 200  # blue stroke now included
+
+
+def test_whiten_background_clears_everything_but_the_ink():
+    # A textured (non-white) background, like a card photo, with a
+    # signature-like stroke on it.
+    image = np.full((100, 200, 3), 180, dtype=np.uint8)
+    cv2.line(image, (40, 50), (160, 50), (0, 0, 0), 5)
+
+    whitened = whiten_background(image)
+
+    assert tuple(whitened[10, 10]) == (255, 255, 255)  # far from the stroke
+    assert tuple(whitened[50, 100])[0] < 128  # on the stroke, still dark
+
+
+def test_whiten_background_handles_empty_image():
+    empty = np.zeros((0, 0, 3), dtype=np.uint8)
+    assert whiten_background(empty).size == 0
+
+
+def test_orient_horizontal_rotates_portrait_to_landscape():
+    portrait = np.zeros((100, 40, 3), dtype=np.uint8)
+    portrait[10, 5] = (1, 2, 3)  # a marker pixel to check rotation direction
+
+    landscape = orient_horizontal(portrait, direction="counterclockwise")
+
+    assert landscape.shape[0] < landscape.shape[1]  # now width > height
+    assert np.array_equal(
+        landscape, cv2.rotate(portrait, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    )
+
+
+def test_orient_horizontal_direction_matters():
+    portrait = np.zeros((100, 40, 3), dtype=np.uint8)
+    portrait[10, 5] = (1, 2, 3)
+
+    cw = orient_horizontal(portrait, direction="clockwise")
+    ccw = orient_horizontal(portrait, direction="counterclockwise")
+
+    assert not np.array_equal(cw, ccw)
+
+
+def test_orient_horizontal_is_noop_for_landscape_or_square():
+    landscape = np.zeros((40, 100, 3), dtype=np.uint8)
+    square = np.zeros((50, 50, 3), dtype=np.uint8)
+
+    assert np.array_equal(orient_horizontal(landscape), landscape)
+    assert np.array_equal(orient_horizontal(square), square)

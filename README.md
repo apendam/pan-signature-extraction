@@ -92,6 +92,29 @@ python scripts/extract_signature.py \
 in green on top of the original image — use it to calibrate
 `LocatorConfig.default_roi_fraction` in `pan_signature/config.py` against
 your own PAN samples before relying on the fallback path in production.
+(The debug overlay always shows the *unmodified* source image; the
+whitening/rotation below only apply to `--out`, the final saved crop.)
+
+### Final output: white background, landscape orientation
+
+`signature.png` isn't just the raw crop -- `pipeline.py` runs two more
+steps on it by default (`ExtractorConfig` in `pan_signature/config.py`):
+
+- **`whiten_background`**: replaces everything except the detected ink
+  with solid white, so you get a clean signature image instead of the
+  card's textured background.
+- **`orient_horizontal`**: rotates a taller-than-wide crop 90 degrees so
+  it comes out landscape (a signature reads naturally left-to-right,
+  wider than tall). No-op if the crop is already landscape or square.
+
+Both were verified against the same real PAN card: the whitened output
+contains only the signature ink, and the rotation direction
+(`ExtractorConfig.rotate_direction`, default `"counterclockwise"`) was
+picked by actually checking the signature reads left-to-right afterward,
+not backwards. If your source images are scanned rotated the other way,
+the signature will come out reading backwards and you should set
+`rotate_direction="clockwise"` instead. Set `whiten_background=False` /
+`orient_horizontal=False` on `ExtractorConfig` to disable either step.
 
 ## Alternative provider: Mistral OCR
 

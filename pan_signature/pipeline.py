@@ -17,7 +17,7 @@ from .config import (
 from .docai_client import DocumentAIClient
 from .mistral_client import MistralOCRClient
 from .mistral_signature_locator import locate_signature_region_mistral
-from .signature_extractor import refine_and_crop
+from .signature_extractor import orient_horizontal, refine_and_crop, whiten_background
 from .signature_locator import BBox, locate_signature_region
 
 _MIME_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png"}
@@ -39,6 +39,9 @@ def extract_signature(
     extractor_config: ExtractorConfig = ExtractorConfig(),
     debug_out_path: str | None = None,
 ) -> tuple[np.ndarray, BBox]:
+    """Returns (signature_image, bbox_in_original_image). `bbox_in_original_image`
+    is in the source image's coordinate frame regardless of any whitening/
+    rotation `extractor_config` applies to `signature_image` itself."""
     path = Path(image_path)
     image_bytes = path.read_bytes()
     image_bgr = cv2.imread(str(path))
@@ -74,5 +77,12 @@ def extract_signature(
             2,
         )
         cv2.imwrite(debug_out_path, debug_image)
+
+    if extractor_config.whiten_background:
+        signature_crop = whiten_background(signature_crop, extractor_config)
+    if extractor_config.orient_horizontal:
+        signature_crop = orient_horizontal(
+            signature_crop, extractor_config.rotate_direction
+        )
 
     return signature_crop, refined_bbox

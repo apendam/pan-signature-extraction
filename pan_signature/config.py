@@ -42,6 +42,17 @@ class ExtractorConfig:
     # signature out of the crop. Confirmed against a real sample; harmless
     # no-op on grayscale scans since desaturated pixels never match.
     exclude_blue_ink: bool = True
+    # Replace everything outside the detected ink strokes with solid
+    # white, so the output isn't the original card's textured background.
+    whiten_background: bool = True
+    # Rotate a taller-than-wide crop 90 degrees so width > height (a
+    # signature reads naturally landscape). No-op if already landscape.
+    orient_horizontal: bool = True
+    # Which way to rotate when orient_horizontal kicks in. Confirmed
+    # against a real sample scanned in portrait orientation (verified the
+    # signature reads left-to-right afterward, not backwards); if your
+    # source images are rotated the other way, flip this to "clockwise".
+    rotate_direction: str = "counterclockwise"
 
 
 @dataclass(frozen=True)
