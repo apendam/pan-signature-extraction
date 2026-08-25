@@ -1,36 +1,31 @@
 """Turn a Mistral OCR response into a pixel region of interest (ROI) for
 the signature.
 
-Unlike Document AI's presence-only signature field (see `docai_client.py`
-and `signature_locator.py`), Mistral's OCR block-classification feature
-(`include_blocks=True`, the default -- documented under "OCR 4" at
-docs.mistral.ai/studio/document-processing/basic_ocr) can label a content
-block's `type` field with the literal value `"signature"` directly,
-carrying its own bounding box on four flat fields: `top_left_x`,
-`top_left_y`, `bottom_right_x`, `bottom_right_y`. If that holds, no
-anchor-text heuristic is needed on this path.
+Empirical finding (tested against a real Indian PAN card, using both
+`model="mistral-ocr-latest"` and the explicit `"mistral-ocr-4-1"`): no
+block ever came back with `type == "signature"`. Instead, the signature's
+ink and the printed caption next to it ("हस्ताक्षर / Signature") were
+merged into one ordinary `"text"` block. So the "no anchor heuristic
+needed" idea (Mistral hands you a signature box directly) does not hold
+up in practice for this document type -- the docs describe a `type`
+field with a `"signature"` value, and the installed SDK's response models
+agree on the field names, but that classification apparently doesn't
+trigger for a compact, ID-card-style signature area.
 
-Schema assumption and confidence
----------------------------------
-The field names above match both the official docs and the response
-models shipped in the `mistralai` SDK actually installed for this project
-(`OCRSignatureBlock` etc. in `mistralai.client.models`) -- so the field
-*names* are well supported. What is **not** confirmed is a real, populated
-example: no API response containing an actual signature-typed block could
-be found in Mistral's docs or in third-party write-ups at the time this
-was written. The SDK types `top_left_x` and friends as plain integers,
-which suggests they are absolute pixel coordinates rather than normalized
-0..1 fractions, but that is inferred from the declared schema, not from
-a live call. **Re-run this against one real OCR call on a document with
-a visible signature before relying on it in production.**
+This module therefore mirrors `signature_locator.py`'s tiered, degrade-
+gracefully approach instead of assuming a dedicated block exists:
 
-Because of that residual uncertainty this module (a) checks a short list
-of plausible field-name variants for the block-type discriminator instead
-of hard-coding a single guess, and raises a specific error naming what it
-checked if nothing matches, rather than silently returning the wrong
-region, and (b) accepts either an absolute-pixel or a normalized (0..1)
-bounding box, deciding which by checking whether any coordinate exceeds
-1.0 (a normalized fraction cannot).
+1. If a block's type discriminator does say "signature" (kept in case a
+   future model version or a different document layout does emit it),
+   use it.
+2. Otherwise, look for a block whose *content* text contains one of
+   `LocatorConfig.anchor_keywords` (e.g. "Signature" / "हस्ताक्षर") and
+   use that block's own bounding box as the ROI -- confirmed on a real
+   sample to tightly bound the signature (plus its caption, which
+   `refine_and_crop()`'s blue-ink exclusion then strips back out, since
+   the caption is printed in blue and the signature is black).
+3. Otherwise, fall back to `LocatorConfig.default_roi_fraction`, exactly
+   as the Document AI path does.
 
 This module only reads plain attributes/keys (duck-typed) so it works
 against the real `mistralai` SDK response object or against a
@@ -38,6 +33,7 @@ lightweight dict/SimpleNamespace stand-in with the same shape in tests.
 """
 from __future__ import annotations
 
+from .config import LocatorConfig
 from .signature_locator import BBox
 
 # "type" is the field name confirmed by both the Mistral docs and the
@@ -64,9 +60,13 @@ def _blocks_of(page):
     return _get(page, "blocks") or []
 
 
+def _all_blocks(ocr_response):
+    for page in _pages_of(ocr_response):
+        for block in _blocks_of(page):
+            yield block
+
+
 def _block_type_value(block):
-    """Return the block's type-discriminator string, checking each
-    plausible field name in turn, or None if none of them are present."""
     for name in _TYPE_FIELD_NAMES:
         value = _get(block, name)
         if isinstance(value, str) and value:
@@ -78,12 +78,39 @@ def _is_signature_type(value: str) -> bool:
     return "signature" in value.strip().lower()
 
 
-def _find_signature_block(ocr_response):
-    for page in _pages_of(ocr_response):
-        for block in _blocks_of(page):
-            value = _block_type_value(block)
-            if value is not None and _is_signature_type(value):
-                return block
+def _block_content(block) -> str:
+    return _get(block, "content") or ""
+
+
+def _contains_keyword(text: str, keywords) -> bool:
+    lowered = text.lower()
+    return any(keyword.lower() in lowered for keyword in keywords)
+
+
+def _lowest(blocks):
+    """Prefer the bottom-most match (largest top_left_y), same tie-break
+    as the Document AI anchor locator, in case more than one candidate
+    matches."""
+    return max(blocks, key=lambda b: _get(b, "top_left_y") or 0)
+
+
+def _find_signature_block(ocr_response, keywords):
+    typed_matches = [
+        block
+        for block in _all_blocks(ocr_response)
+        if (value := _block_type_value(block)) is not None and _is_signature_type(value)
+    ]
+    if typed_matches:
+        return _lowest(typed_matches)
+
+    content_matches = [
+        block
+        for block in _all_blocks(ocr_response)
+        if _contains_keyword(_block_content(block), keywords)
+    ]
+    if content_matches:
+        return _lowest(content_matches)
+
     return None
 
 
@@ -113,16 +140,23 @@ def _bbox_from_block(block, image_width: int, image_height: int) -> BBox:
     ).clip(image_width, image_height)
 
 
+def _default_roi(image_width: int, image_height: int, config: LocatorConfig) -> BBox:
+    roi_x0, roi_y0, roi_x1, roi_y1 = config.default_roi_fraction
+    return BBox(
+        x0=round(roi_x0 * image_width),
+        y0=round(roi_y0 * image_height),
+        x1=round(roi_x1 * image_width),
+        y1=round(roi_y1 * image_height),
+    ).clip(image_width, image_height)
+
+
 def locate_signature_region_mistral(
-    ocr_response, image_width: int, image_height: int
+    ocr_response,
+    image_width: int,
+    image_height: int,
+    config: LocatorConfig = LocatorConfig(),
 ) -> BBox:
-    block = _find_signature_block(ocr_response)
+    block = _find_signature_block(ocr_response, config.anchor_keywords)
     if block is None:
-        raise RuntimeError(
-            "No signature block found in the Mistral OCR response. Checked "
-            f"each block's {_TYPE_FIELD_NAMES} field(s) for a value "
-            "containing 'signature'; none matched. Make sure the OCR call "
-            "was made with include_blocks=True and that the document has "
-            "a visible/legible signature region."
-        )
+        return _default_roi(image_width, image_height, config)
     return _bbox_from_block(block, image_width, image_height)

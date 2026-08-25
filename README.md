@@ -99,7 +99,8 @@ By default this pipeline uses Google Document AI as described above. As
 an alternative, pass `--provider mistral` to use Mistral's OCR API
 instead.
 
-The two providers locate the signature differently:
+Both providers end up doing basically the same kind of anchor-text
+heuristic, just against different response shapes:
 
 - **Document AI** (default): a plain OCR/Form Parser processor returns
   text tokens with bounding boxes; `signature_locator.py` anchors the ROI
@@ -107,11 +108,24 @@ The two providers locate the signature differently:
   fraction), because Document AI's own signature field is presence-only
   (see above).
 - **Mistral**: its OCR block-classification feature (`include_blocks`,
-  on by default -- added with Mistral's "OCR 4" model, which introduced
-  per-block type classification) can tag a content block's `type` as
-  `"signature"` directly, with its own bounding box. `mistral_signature_locator.py`
-  reads that box straight off the response, so no anchor-text heuristic
-  is needed on this path.
+  on by default) is documented as being able to tag a content block's
+  `type` as `"signature"` directly. Tested against a real Indian PAN
+  card, that never actually happened -- with both `mistral-ocr-latest`
+  and the explicit `mistral-ocr-4-1` model, the signature's ink and the
+  printed `"हस्ताक्षर / Signature"` caption next to it came back merged
+  into one ordinary `"text"` block. So `mistral_signature_locator.py`
+  keeps the type-based check (in case a future model version or a
+  different layout does emit it) but falls back to the same
+  content-keyword anchor `signature_locator.py` uses, then to
+  `LocatorConfig.default_roi_fraction` -- same tiered degrade-gracefully
+  shape on both providers.
+
+Since the caption ends up inside the same box as the signature on both
+providers, `refine_and_crop()` also excludes blue ink before
+thresholding: real PAN cards print field captions in blue and signed/
+entered values in black, so filtering by color cleanly strips the
+caption back out of the crop. This is on by default
+(`ExtractorConfig.exclude_blue_ink`) and is a no-op on grayscale scans.
 
 ### Setup
 
@@ -129,16 +143,17 @@ The two providers locate the signature differently:
 
 ### Caveats
 
-Same honesty standard as the rest of this README: the response field
-names `mistral_signature_locator.py` relies on (`type`, `top_left_x`,
-`top_left_y`, `bottom_right_x`, `bottom_right_y`) were confirmed against
-Mistral's own docs and against the response models shipped in the
-installed `mistralai` SDK, but **not** against a real API call that
-actually returned a populated signature block -- no such example could be
-found anywhere at the time this was written. Double-check the exact
-field names against one real API call before trusting this in
-production; see that module's docstring for how it also handles the
-absolute-pixel-vs-normalized-0..1 coordinate ambiguity defensively.
+This path (block-type check -> content-keyword anchor -> default ROI,
+feeding into `refine_and_crop()`'s blue-ink exclusion) has been run
+end-to-end against a real Indian PAN card and produced a clean signature
+crop with the caption excluded. What's still just one data point: only
+one card layout, one rotation, one ink-color convention have actually
+been tested. The bbox field names (`top_left_x/y`, `bottom_right_x/y`)
+and the pixel-vs-normalized coordinate handling in
+`mistral_signature_locator.py` are confirmed against that real response;
+if your cards use a different layout or color convention, recalibrate
+`LocatorConfig`/`ExtractorConfig` (`--debug` overlay is there for this)
+before trusting it on your full corpus.
 
 It's also worth noting that Mistral's usage policy disclaims use of its
 models for "financial decisions." A PAN card is a financial-identity

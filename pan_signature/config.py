@@ -18,7 +18,9 @@ class DocAIConfig:
 @dataclass(frozen=True)
 class LocatorConfig:
     # Text tokens that, if found on the page, anchor the signature ROI.
-    anchor_keywords: tuple = ("signature", "sign")
+    # "हस्ताक्षर" (Hindi for "signature") is printed next to the English
+    # caption on real Indian PAN cards -- confirmed against a real sample.
+    anchor_keywords: tuple = ("signature", "sign", "हस्ताक्षर")
     # Fallback ROI as (x0, y0, x1, y1) fractions of the page, used when no
     # anchor text is found. Tuned for the bottom-left signature box common
     # on Indian PAN cards; recalibrate against your own samples with
@@ -34,6 +36,12 @@ class LocatorConfig:
 class ExtractorConfig:
     min_component_area_fraction: float = 0.0006
     padding_px: int = 6
+    # Real Indian PAN cards print field captions (e.g. "Signature") in
+    # blue and handwritten/entered values in black -- excluding blue ink
+    # before thresholding keeps a caption sitting right next to the
+    # signature out of the crop. Confirmed against a real sample; harmless
+    # no-op on grayscale scans since desaturated pixels never match.
+    exclude_blue_ink: bool = True
 
 
 @dataclass(frozen=True)

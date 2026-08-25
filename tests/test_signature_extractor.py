@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 
+from pan_signature.config import ExtractorConfig
 from pan_signature.signature_extractor import refine_and_crop
 from pan_signature.signature_locator import BBox
 
@@ -45,3 +46,30 @@ def test_empty_roi_is_handled_gracefully():
 
     assert refined_crop.size == 0
     assert refined_bbox == roi
+
+
+def test_excludes_blue_printed_caption_next_to_black_signature():
+    # Mirrors a real Indian PAN card: a blue printed caption sits right
+    # next to the black signature within the same coarse ROI.
+    image = _blank_page()
+    cv2.line(image, (60, 150), (140, 130), (0, 0, 0), 3)  # black "signature"
+    cv2.line(image, (260, 150), (340, 130), (255, 0, 0), 3)  # blue "caption" (BGR)
+
+    roi = BBox(x0=0, y0=100, x1=400, y1=200)
+    refined_crop, refined_bbox = refine_and_crop(image, roi)
+
+    assert refined_bbox.x1 <= 200  # blue stroke (x>=260) excluded
+    assert refined_bbox.x0 <= 60 and refined_bbox.x1 >= 140  # black stroke kept
+    assert refined_crop.size > 0
+
+
+def test_keeps_blue_ink_when_exclusion_is_disabled():
+    image = _blank_page()
+    cv2.line(image, (60, 150), (140, 130), (0, 0, 0), 3)
+    cv2.line(image, (260, 150), (340, 130), (255, 0, 0), 3)
+
+    roi = BBox(x0=0, y0=100, x1=400, y1=200)
+    config = ExtractorConfig(exclude_blue_ink=False)
+    refined_crop, refined_bbox = refine_and_crop(image, roi, config)
+
+    assert refined_bbox.x1 > 200  # blue stroke now included

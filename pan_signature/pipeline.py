@@ -57,7 +57,7 @@ def extract_signature(
         ocr_response = client.process_image_bytes(
             image_bytes, mime_type=_mime_type_for(path)
         )
-        roi = locate_signature_region_mistral(ocr_response, width, height)
+        roi = locate_signature_region_mistral(ocr_response, width, height, locator_config)
     else:
         raise ValueError(f"Unknown provider: {provider!r}. Use 'docai' or 'mistral'.")
 

@@ -1,12 +1,15 @@
 """Thin wrapper around the Mistral OCR API's ``ocr.process`` call.
 
-Note on scope: unlike Document AI, whose "signature" field only reports
-presence with no bounding box (see `docai_client.py`), Mistral's OCR block
-classification (`include_blocks=True`, the default) can tag a content
-block's `type` as `"signature"` directly, with its own bounding box --
-so no OCR-anchor heuristic is needed on this path. See
-`mistral_signature_locator.py` for the caveat on how firmly that response
-schema is confirmed and how the bounding box is interpreted.
+Note on scope: Mistral's OCR block classification (`include_blocks=True`,
+the default) is documented as being able to tag a content block's `type`
+as `"signature"` directly, with its own bounding box. In practice, tested
+against a real Indian PAN card with both `model="mistral-ocr-latest"` and
+the explicit `"mistral-ocr-4-1"`, no block ever came back typed that way
+-- the signature and a printed caption next to it were merged into one
+ordinary `"text"` block instead. So this path still needs an anchor-style
+fallback, same spirit as Document AI's OCR-anchor heuristic (see
+`docai_client.py`). See `mistral_signature_locator.py` for exactly how
+that's handled.
 """
 from __future__ import annotations
 

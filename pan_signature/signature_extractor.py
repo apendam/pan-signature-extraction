@@ -1,9 +1,11 @@
 """OpenCV refinement: shrink a coarse ROI down to the actual ink strokes.
 
-The ROI from `signature_locator.py` is deliberately generous (a caption
-anchor or a fixed page fraction). This step thresholds it, groups dark
-pixels into connected components, and tightens the crop to the union of
-components that look like ink rather than page noise.
+The ROI from `signature_locator.py` / `mistral_signature_locator.py` is
+deliberately generous (a caption anchor's own bounding box, or a fixed
+page fraction). This step thresholds it, optionally strips out printed
+blue caption text, groups the remaining dark pixels into connected
+components, and tightens the crop to the union of components that look
+like ink rather than page noise.
 """
 from __future__ import annotations
 
@@ -12,6 +14,13 @@ import numpy as np
 
 from .config import ExtractorConfig
 from .signature_locator import BBox
+
+# Confirmed against a real Indian PAN card: the printed field caption
+# ("हस्ताक्षर / Signature") sitting right next to the signature is blue,
+# while the signature itself is black. These HSV bounds (OpenCV's 0-180
+# hue scale) are a generic "blue ink" range, not tuned to one sample.
+_BLUE_INK_HSV_LOWER = np.array([90, 60, 40])
+_BLUE_INK_HSV_UPPER = np.array([140, 255, 255])
 
 
 def refine_and_crop(
@@ -35,6 +44,12 @@ def refine_and_crop(
     _, mask = cv2.threshold(
         blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
     )
+
+    if config.exclude_blue_ink:
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        blue_mask = cv2.inRange(hsv, _BLUE_INK_HSV_LOWER, _BLUE_INK_HSV_UPPER)
+        mask = cv2.bitwise_and(mask, cv2.bitwise_not(blue_mask))
+
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
 
