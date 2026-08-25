@@ -93,6 +93,61 @@ in green on top of the original image — use it to calibrate
 `LocatorConfig.default_roi_fraction` in `pan_signature/config.py` against
 your own PAN samples before relying on the fallback path in production.
 
+## Alternative provider: Mistral OCR
+
+By default this pipeline uses Google Document AI as described above. As
+an alternative, pass `--provider mistral` to use Mistral's OCR API
+instead.
+
+The two providers locate the signature differently:
+
+- **Document AI** (default): a plain OCR/Form Parser processor returns
+  text tokens with bounding boxes; `signature_locator.py` anchors the ROI
+  on a `"Signature"` caption token (or falls back to a fixed page
+  fraction), because Document AI's own signature field is presence-only
+  (see above).
+- **Mistral**: its OCR block-classification feature (`include_blocks`,
+  on by default -- added with Mistral's "OCR 4" model, which introduced
+  per-block type classification) can tag a content block's `type` as
+  `"signature"` directly, with its own bounding box. `mistral_signature_locator.py`
+  reads that box straight off the response, so no anchor-text heuristic
+  is needed on this path.
+
+### Setup
+
+1. Get an API key from [console.mistral.ai](https://console.mistral.ai).
+2. Add `MISTRAL_API_KEY` (and optionally `MISTRAL_OCR_MODEL`, which
+   defaults to `mistral-ocr-latest`) to your `.env` -- see `.env.example`.
+3. Run with the Mistral backend:
+
+   ```bash
+   python scripts/extract_signature.py \
+     --image path/to/pan_sample.jpg \
+     --out signature.png \
+     --provider mistral
+   ```
+
+### Caveats
+
+Same honesty standard as the rest of this README: the response field
+names `mistral_signature_locator.py` relies on (`type`, `top_left_x`,
+`top_left_y`, `bottom_right_x`, `bottom_right_y`) were confirmed against
+Mistral's own docs and against the response models shipped in the
+installed `mistralai` SDK, but **not** against a real API call that
+actually returned a populated signature block -- no such example could be
+found anywhere at the time this was written. Double-check the exact
+field names against one real API call before trusting this in
+production; see that module's docstring for how it also handles the
+absolute-pixel-vs-normalized-0..1 coordinate ambiguity defensively.
+
+It's also worth noting that Mistral's usage policy disclaims use of its
+models for "financial decisions." A PAN card is a financial-identity
+document, so that's relevant context here -- but this pipeline only
+*locates and crops* a signature image (an extraction/automation step); it
+does not make any eligibility, verification, or other financial
+decision. If your use case feeds this into a decision downstream, review
+Mistral's usage policy yourself before relying on this provider for it.
+
 ## Tests
 
 The unit tests are fully offline (no GCP credentials needed) — they

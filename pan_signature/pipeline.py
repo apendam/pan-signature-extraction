@@ -1,4 +1,4 @@
-"""End-to-end: image on disk -> Document AI OCR -> ROI -> OpenCV crop."""
+"""End-to-end: image on disk -> OCR (Document AI or Mistral) -> ROI -> OpenCV crop."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -6,8 +6,17 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .config import DocAIConfig, ExtractorConfig, LocatorConfig, docai_config_from_env
+from .config import (
+    DocAIConfig,
+    ExtractorConfig,
+    LocatorConfig,
+    MistralConfig,
+    docai_config_from_env,
+    mistral_config_from_env,
+)
 from .docai_client import DocumentAIClient
+from .mistral_client import MistralOCRClient
+from .mistral_signature_locator import locate_signature_region_mistral
 from .signature_extractor import refine_and_crop
 from .signature_locator import BBox, locate_signature_region
 
@@ -23,7 +32,9 @@ def _mime_type_for(path: Path) -> str:
 
 def extract_signature(
     image_path: str,
+    provider: str = "docai",
     docai_config: DocAIConfig | None = None,
+    mistral_config: MistralConfig | None = None,
     locator_config: LocatorConfig = LocatorConfig(),
     extractor_config: ExtractorConfig = ExtractorConfig(),
     debug_out_path: str | None = None,
@@ -35,10 +46,21 @@ def extract_signature(
         raise ValueError(f"OpenCV could not read image: {image_path}")
     height, width = image_bgr.shape[:2]
 
-    client = DocumentAIClient(docai_config or docai_config_from_env())
-    document = client.process_image_bytes(image_bytes, mime_type=_mime_type_for(path))
+    if provider == "docai":
+        client = DocumentAIClient(docai_config or docai_config_from_env())
+        document = client.process_image_bytes(
+            image_bytes, mime_type=_mime_type_for(path)
+        )
+        roi = locate_signature_region(document, width, height, locator_config)
+    elif provider == "mistral":
+        client = MistralOCRClient(mistral_config or mistral_config_from_env())
+        ocr_response = client.process_image_bytes(
+            image_bytes, mime_type=_mime_type_for(path)
+        )
+        roi = locate_signature_region_mistral(ocr_response, width, height)
+    else:
+        raise ValueError(f"Unknown provider: {provider!r}. Use 'docai' or 'mistral'.")
 
-    roi = locate_signature_region(document, width, height, locator_config)
     signature_crop, refined_bbox = refine_and_crop(image_bgr, roi, extractor_config)
 
     if debug_out_path:

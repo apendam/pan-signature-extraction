@@ -4,9 +4,12 @@
 Usage:
     python scripts/extract_signature.py --image sample.jpg --out signature.png
     python scripts/extract_signature.py --image sample.jpg --out signature.png --debug debug.jpg
+    python scripts/extract_signature.py --image sample.jpg --out signature.png --provider mistral
 
 Requires GOOGLE_CLOUD_PROJECT and DOCAI_PROCESSOR_ID (and optionally
-DOCAI_LOCATION) in the environment -- see .env.example.
+DOCAI_LOCATION) in the environment for --provider docai (the default), or
+MISTRAL_API_KEY (and optionally MISTRAL_OCR_MODEL) for --provider mistral
+-- see .env.example.
 """
 import argparse
 import sys
@@ -24,6 +27,12 @@ def main() -> int:
     parser.add_argument("--image", required=True, help="Path to the PAN image")
     parser.add_argument("--out", required=True, help="Where to save the cropped signature")
     parser.add_argument(
+        "--provider",
+        choices=["docai", "mistral"],
+        default="docai",
+        help="OCR backend to use for locating the signature (default: docai)",
+    )
+    parser.add_argument(
         "--debug",
         default=None,
         help="Optional path to save a copy of the input with the ROI (orange) "
@@ -31,7 +40,9 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    crop, bbox = extract_signature(args.image, debug_out_path=args.debug)
+    crop, bbox = extract_signature(
+        args.image, provider=args.provider, debug_out_path=args.debug
+    )
     cv2.imwrite(args.out, crop)
     print(f"Saved signature crop to {args.out} (bbox={bbox.as_tuple()})")
     if args.debug:

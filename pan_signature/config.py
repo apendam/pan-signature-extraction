@@ -36,6 +36,12 @@ class ExtractorConfig:
     padding_px: int = 6
 
 
+@dataclass(frozen=True)
+class MistralConfig:
+    api_key: str
+    model: str
+
+
 def docai_config_from_env() -> DocAIConfig:
     missing = [
         name
@@ -51,4 +57,17 @@ def docai_config_from_env() -> DocAIConfig:
         project_id=os.environ["GOOGLE_CLOUD_PROJECT"],
         location=os.environ.get("DOCAI_LOCATION", "us"),
         processor_id=os.environ["DOCAI_PROCESSOR_ID"],
+    )
+
+
+def mistral_config_from_env() -> MistralConfig:
+    missing = [name for name in ("MISTRAL_API_KEY",) if not os.environ.get(name)]
+    if missing:
+        raise RuntimeError(
+            "Missing required environment variable(s): "
+            f"{', '.join(missing)}. See .env.example."
+        )
+    return MistralConfig(
+        api_key=os.environ["MISTRAL_API_KEY"],
+        model=os.environ.get("MISTRAL_OCR_MODEL", "mistral-ocr-latest"),
     )
