@@ -1,8 +1,11 @@
+from dataclasses import replace
+
 import cv2
 import numpy as np
 
 from pan_signature.config import ExtractorConfig
 from pan_signature.signature_extractor import (
+    binarize,
     orient_horizontal,
     refine_and_crop,
     whiten_background,
@@ -124,3 +127,58 @@ def test_orient_horizontal_is_noop_for_landscape_or_square():
 
     assert np.array_equal(orient_horizontal(landscape), landscape)
     assert np.array_equal(orient_horizontal(square), square)
+
+
+def test_binarize_outputs_only_pure_black_and_white():
+    crop = np.full((60, 120, 3), (200, 180, 120), dtype=np.uint8)  # tinted card
+    cv2.line(crop, (10, 40), (100, 20), (120, 40, 20), 3)  # blue-pen stroke
+
+    out = binarize(crop, ExtractorConfig(exclude_blue_ink=False))
+
+    assert out.ndim == 3 and out.shape[2] == 3
+    assert set(np.unique(out)) <= {0, 255}
+    assert (out == 0).any() and (out == 255).any()
+
+
+def test_binarize_keeps_dark_stroke_and_drops_faint_halo():
+    crop = np.full((60, 200, 3), 230, dtype=np.uint8)
+    cv2.line(crop, (10, 30), (190, 30), (200, 190, 150), 9)  # faint wide halo
+    cv2.line(crop, (10, 30), (190, 30), (20, 20, 20), 2)  # dark core stroke
+
+    out = binarize(crop, ExtractorConfig(exclude_blue_ink=False))
+
+    scale = out.shape[0] // crop.shape[0]
+    black_rows = np.where((out[:, :, 0] == 0).any(axis=1))[0]
+    # Black pixels hug the thin core (a few px tall), not the 9px halo.
+    assert (black_rows.max() - black_rows.min()) / scale < 6
+
+
+def test_binarize_bridges_a_faint_gap_in_a_stroke():
+    # A pen stroke whose middle is faint (what a dashed/broken line looks
+    # like on a low-res card) should come out as ONE connected stroke.
+    crop = np.full((50, 200, 3), 235, dtype=np.uint8)
+    cv2.line(crop, (10, 25), (80, 25), (20, 20, 20), 3)
+    cv2.line(crop, (80, 25), (120, 25), (100, 100, 100), 3)  # ink-like but weaker middle
+    cv2.line(crop, (120, 25), (190, 25), (20, 20, 20), 3)
+
+    def strokes(config):
+        out = binarize(crop, config)
+        n, _ = cv2.connectedComponents((out[:, :, 0] == 0).astype(np.uint8))
+        return n - 1
+
+    base = ExtractorConfig(exclude_blue_ink=False, binarize_smooth=False)
+    # Without hysteresis (weak cut-off == strong cut-off) the weak middle
+    # is dropped and the stroke breaks in two; with it, the stroke holds.
+    assert strokes(replace(base, binarize_weak_cutoff=base.binarize_strictness)) == 2
+    assert strokes(base) == 1
+
+
+def test_binarize_drops_isolated_specks():
+    crop = np.full((50, 200, 3), 235, dtype=np.uint8)
+    cv2.line(crop, (10, 25), (190, 25), (20, 20, 20), 3)
+    crop[5, 5] = (20, 20, 20)  # one-pixel dust speck far from the stroke
+
+    out = binarize(crop, ExtractorConfig(exclude_blue_ink=False))
+
+    scale = out.shape[0] // crop.shape[0]
+    assert (out[: 12 * scale, : 12 * scale] == 255).all()

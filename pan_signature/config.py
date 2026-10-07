@@ -30,6 +30,21 @@ class LocatorConfig:
     # of page height/width.
     anchor_margin_below: float = 0.22
     anchor_margin_right: float = 0.35
+    # Mistral path: PAN cards print the signature ABOVE its "Signature"
+    # caption, so when the caption is its own OCR block the ROI is built
+    # upward from the caption's top edge. Heights are in multiples of the
+    # caption's line height; widths are fractions of the caption's width
+    # (handwriting is often wider than the printed caption).
+    caption_search_lines_above: float = 3.0
+    caption_pad_left: float = 0.6
+    caption_pad_right: float = 0.6
+    # Upper bound on the printed caption's height (fraction of image
+    # height) when trimming it off a merged signature+caption block.
+    max_caption_height_fraction: float = 0.04
+    # Keywords for the "Date of Birth" block, used as a fallback anchor
+    # (the signature sits to its right on newer PAN layouts) when OCR
+    # garbles or drops the signature caption.
+    dob_keywords: tuple = ("date of birth", "जन्म")
 
 
 @dataclass(frozen=True)
@@ -48,6 +63,37 @@ class ExtractorConfig:
     # Rotate a taller-than-wide crop 90 degrees so width > height (a
     # signature reads naturally landscape). No-op if already landscape.
     orient_horizontal: bool = True
+    # Final output as pure black ink on a pure white background (instead
+    # of keeping the ink's original color). Supersedes whiten_background.
+    black_and_white: bool = True
+    # How the black-and-white step keeps only the darkest, highest-contrast
+    # strokes: a second threshold is taken between the coarse ink cut-off
+    # (0.0) and the stricter "strong ink" cut-off (1.0). Lower keeps more
+    # faint ink (and more caption/background); higher drops faint strokes.
+    binarize_strictness: float = 0.6
+    # Small crops are upscaled (cubic) before thresholding so thin strokes
+    # on low-resolution cards stay separate instead of merging into
+    # blobs. The scale is chosen to bring the long side near this many
+    # pixels, between 1x and 4x.
+    binarize_target_long_side: int = 800
+    # Hysteresis: besides the strong ink pixels (binarize_strictness), keep
+    # weaker ink pixels that are connected to one of them. This repairs
+    # broken/dashed strokes (the faint middle of a pen stroke) without
+    # re-admitting isolated background. Same 0..1 scale as strictness;
+    # must be <= binarize_strictness. Lower = bolder, more connected.
+    binarize_weak_cutoff: float = 0.35
+    # Light non-local-means denoise of the color crop before thresholding.
+    binarize_denoise: bool = True
+    # Close 1px gaps and smooth jagged edges of the final mask.
+    binarize_smooth: bool = True
+    # Drop isolated specks smaller than this many pixels (measured at the
+    # original crop's resolution, before upscaling).
+    binarize_min_speck_px: int = 6
+    # Pick out ink by local contrast (black-hat transform) instead of one
+    # global Otsu threshold: thin dark/colored strokes stand out while
+    # smooth card-background patches (holograms, gradients) do not. Used
+    # when the ROI is already caption-free, so blue-pen signatures are kept.
+    local_contrast_ink: bool = False
     # Which way to rotate when orient_horizontal kicks in. Confirmed
     # against a real sample scanned in portrait orientation (verified the
     # signature reads left-to-right afterward, not backwards); if your

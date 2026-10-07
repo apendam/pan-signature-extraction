@@ -29,9 +29,17 @@ def _ink_mask(crop_bgr: np.ndarray, config: ExtractorConfig) -> np.ndarray:
     bounding box) and `whiten_background` (to know what to keep)."""
     gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (3, 3), 0)
-    _, mask = cv2.threshold(
-        blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
-    )
+    if config.local_contrast_ink:
+        # Kernel must be wider than a pen stroke but narrower than the
+        # background patches we want to ignore.
+        k = max(5, int(0.25 * min(gray.shape)) | 1)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+        blurred = cv2.morphologyEx(blurred, cv2.MORPH_BLACKHAT, kernel)
+        _, mask = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    else:
+        _, mask = cv2.threshold(
+            blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+        )
 
     if config.exclude_blue_ink:
         hsv = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2HSV)
@@ -96,6 +104,84 @@ def whiten_background(
     mask_3ch = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
     white = np.full_like(crop_bgr, 255)
     return np.where(mask_3ch > 0, crop_bgr, white)
+
+
+def binarize(
+    crop_bgr: np.ndarray, config: ExtractorConfig = ExtractorConfig()
+) -> np.ndarray:
+    """Pure black ink on a pure white background (still a 3-channel BGR
+    image so it can be written/rotated like any other crop).
+
+    Works on a black-hat (local-contrast) response of the crop:
+      1. Optional light denoise, then upscale small crops (so thin strokes
+         on low-resolution cards stay separate; the output can therefore
+         be larger than the input crop).
+      2. A coarse Otsu cut finds everything ink-like; a second cut inside
+         that foreground picks the *strong* ink (the darkest strokes).
+      3. Hysteresis: keep weak ink pixels only where they are connected to
+         strong ink, which bridges broken strokes without admitting
+         lighter blue fringe or card texture that touches no real stroke.
+      4. Close 1px gaps, smooth edges, drop tiny isolated specks.
+    No-op on an empty crop.
+    """
+    if crop_bgr.size == 0:
+        return crop_bgr
+
+    if config.binarize_denoise:
+        crop_bgr = cv2.fastNlMeansDenoisingColored(crop_bgr, None, 3, 3, 5, 15)
+    long_side = max(crop_bgr.shape[:2])
+    scale = int(np.clip(round(config.binarize_target_long_side / long_side), 1, 4))
+    if scale > 1:
+        crop_bgr = cv2.resize(
+            crop_bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_LANCZOS4
+        )
+
+    gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+    k = max(5, int(0.25 * min(gray.shape)) | 1)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+    response = cv2.morphologyEx(blurred, cv2.MORPH_BLACKHAT, kernel)
+
+    coarse_cut, _ = cv2.threshold(response, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    ink = response > coarse_cut
+    if config.exclude_blue_ink:
+        hsv = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2HSV)
+        ink &= cv2.inRange(hsv, _BLUE_INK_HSV_LOWER, _BLUE_INK_HSV_UPPER) == 0
+
+    out = np.full_like(crop_bgr, 255)
+    if ink.sum() < 10:
+        out[ink] = 0
+        return out
+
+    strong_cut, _ = cv2.threshold(
+        response[ink].reshape(-1, 1), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
+    span = strong_cut - coarse_cut
+    strong = ink & (response > coarse_cut + config.binarize_strictness * span)
+    weak = ink & (response > coarse_cut + config.binarize_weak_cutoff * span)
+
+    # Hysteresis: weak components that contain at least one strong pixel.
+    n_labels, labels = cv2.connectedComponents(weak.astype(np.uint8), connectivity=8)
+    keep = np.zeros(n_labels, dtype=bool)
+    keep[np.unique(labels[strong])] = True
+    keep[0] = False
+    mask = (keep[labels] * 255).astype(np.uint8)
+
+    if config.binarize_smooth:
+        mask = cv2.morphologyEx(
+            mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        )
+        sigma = 0.6 * scale / 2 + 0.4
+        mask = ((cv2.GaussianBlur(mask, (0, 0), sigmaX=sigma) > 110) * 255).astype(np.uint8)
+
+    if config.binarize_min_speck_px > 0:
+        n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        min_area = config.binarize_min_speck_px * scale * scale
+        small = np.flatnonzero(stats[:, cv2.CC_STAT_AREA] < min_area)
+        mask[np.isin(labels, small[small > 0])] = 0
+
+    out[mask > 0] = 0
+    return out
 
 
 def orient_horizontal(
