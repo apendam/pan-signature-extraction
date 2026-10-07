@@ -8,7 +8,8 @@ Usage:
 For every image this writes ``<out-dir>/<stem>.sig.png`` (only when the
 signature was found), ``<out-dir>/<stem>.debug.jpg`` (search region in
 orange, final crop in green, on the upright card) and a single
-``<out-dir>/report.csv`` with the PAN type, rotation, status and, for
+``<out-dir>/report.csv`` (and, with ``--pairs-dir``, one ``<stem>.pair.jpg`` per image
+with the card on the left and the signature on the right) with the PAN type, rotation, status and, for
 cards that could not be read, the reason.
 
 ``--ocr-cache-dir`` stores each OCR response as JSON so re-runs (e.g. while
@@ -26,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import cv2
 
+from pan_signature.compose import make_pair
 from pan_signature.config import mistral_config_from_env
 from pan_signature.mistral_client import MistralOCRClient
 from pan_signature.pipeline import NOT_READABLE, OK, _call_ocr, extract_signature_report
@@ -45,7 +47,7 @@ def _ocr(path, client, cache_dir):
     cache_file = cache_dir / f"{path.stem}.json" if cache_dir else None
     if cache_file and cache_file.exists():
         return json.loads(cache_file.read_text())
-    image = cv2.imread(str(path))
+    image = cv2.imread(str(path), cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
     for attempt in range(6):
         try:
             response = _call_ocr(client, image, path)
@@ -69,6 +71,7 @@ def main() -> int:
     parser.add_argument("--images", nargs="+", required=True)
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--ocr-cache-dir", default=None)
+    parser.add_argument("--pairs-dir", default=None, help="also write <stem>.pair.jpg: card on the left, signature on the right")
     parser.add_argument("--limit", type=int, default=None)
     args = parser.parse_args()
 
@@ -76,6 +79,9 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     cache_dir = Path(args.ocr_cache_dir) if args.ocr_cache_dir else None
     files = _collect(args.images)[: args.limit]
+    pairs_dir = Path(args.pairs_dir) if args.pairs_dir else None
+    if pairs_dir:
+        pairs_dir.mkdir(parents=True, exist_ok=True)
     client = None  # created lazily: a fully cached run needs no API key
 
     rows = []
@@ -89,19 +95,25 @@ def main() -> int:
                 str(path), ocr_response=ocr, debug_out_path=str(out_dir / f"{path.stem}.debug.jpg")
             )
         except Exception as exc:  # keep going; report the card instead of aborting the batch
-            rows.append({"image": path.name, "status": NOT_READABLE, "pan_type": "unknown", "rotation": "", "reason": f"error: {str(exc)[:100]}"})
+            rows.append({"image": path.name, "status": NOT_READABLE, "pan_type": "unknown", "rotation": "", "reason": f"error: {str(exc)[:100]}", "ink_fraction": ""})
             print(f"{path.name}: ERROR {exc}")
             continue
         if result.status == OK:
             cv2.imwrite(str(out_dir / f"{path.stem}.sig.png"), result.crop)
+        if pairs_dir:
+            card = result.upright if result.upright is not None else cv2.imread(str(path), cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
+            caption = f"{path.stem}   {result.pan_type}   rotation {result.rotation if result.rotation is not None else '?'}"
+            pair = make_pair(card, result.crop if result.status == OK else None, caption, result.reason)
+            cv2.imwrite(str(pairs_dir / f"{path.stem}.pair.jpg"), pair, [cv2.IMWRITE_JPEG_QUALITY, 92])
         rows.append({
             "image": path.name, "status": result.status, "pan_type": result.pan_type,
             "rotation": "" if result.rotation is None else result.rotation, "reason": result.reason,
+            "ink_fraction": "" if result.ink_fraction is None else f"{result.ink_fraction:.4f}",
         })
         print(f"{path.name}: {result.status} {result.pan_type} rot={result.rotation} {result.reason}")
 
     with (out_dir / "report.csv").open("w", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=["image", "status", "pan_type", "rotation", "reason"])
+        writer = csv.DictWriter(fh, fieldnames=["image", "status", "pan_type", "rotation", "reason", "ink_fraction"])
         writer.writeheader()
         writer.writerows(rows)
     ok = sum(r["status"] == OK for r in rows)

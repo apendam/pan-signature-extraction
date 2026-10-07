@@ -30,6 +30,7 @@ from .signature_locator import BBox
 from .white_box import find_white_box
 
 TYPE1 = "type1_white_box"
+TYPE1_BAND = "type1_white_box_band"  # box not detected; band between DOB and footer
 TYPE2 = "type2_english_caption"
 TYPE3 = "type3_bilingual_caption"
 TYPED = "typed_signature_block"
@@ -40,6 +41,7 @@ _CAPTION_EN = re.compile(r"\bsignature\b", re.I)
 _CAPTION_HI = "हस्ताक्षर"
 _DOB = re.compile(r"date\s*of\s*birth|जन्म", re.I)
 _FOOTER = re.compile(r"digitally\s+signed", re.I)
+_SERIAL = re.compile(r"^\W*\d[\d\s/.\-]{5,}\W*$")  # printed dates / serial numbers
 
 
 @dataclass(frozen=True)
@@ -134,23 +136,123 @@ def _dob_block(blocks):
     return max(matches, key=lambda b: b["y0"]) if matches else None
 
 
+def _dob_footer_window(blocks, width, height):
+    """Band right of the Date-of-Birth block, up to the "Digitally Signed"
+    footer when it sits to the right (where the Type 1 white box lives).
+    Returns (window, bounded_by_footer)."""
+    dob = _dob_block(blocks)
+    if dob is None:
+        return _clip(0.2 * width, 0.55 * height, 0.95 * width, height, width, height), False
+    footer = next((b for b in blocks if _FOOTER.search(_content(b))), None)
+    bounded = bool(footer and footer["x0"] > dob["x1"])
+    x1 = footer["x0"] if bounded else dob["x1"] + 4 * _w(dob)
+    top, bottom = dob["y0"] - 0.25 * _h(dob), dob["y1"] + 0.5 * _h(dob)
+    for other in blocks:
+        # Printed lines just above / below the band (father's name, footer)
+        # are not part of the signature box.
+        if other is dob or other.get("type") not in ("text", "title"):
+            continue
+        overlaps_x = other["x0"] < x1 and other["x1"] > dob["x1"]
+        if not overlaps_x:
+            continue
+        if _FOOTER.search(_content(other)) and other["y0"] > dob["y0"]:
+            bottom = min(bottom, other["y0"] - 2)
+        elif other["y1"] <= dob["y0"] + 0.1 * _h(dob):
+            top = max(top, other["y1"] + 2)
+    window = _clip(dob["x1"] - 0.05 * _w(dob), top, x1, bottom, width, height)
+    return window, bounded
+
+
 def _white_box_roi(image_bgr: np.ndarray, blocks, has_footer: bool) -> BBox | None:
     height, width = image_bgr.shape[:2]
-    dob = _dob_block(blocks)
-    if dob is not None:
-        footer = next((b for b in blocks if _FOOTER.search(_content(b))), None)
-        x1 = footer["x0"] if footer and footer["x0"] > dob["x1"] else dob["x1"] + 4 * _w(dob)
-        window = _clip(
-            dob["x1"] - 0.05 * _w(dob),
-            dob["y0"] - 0.6 * _h(dob),
-            x1,
-            dob["y1"] + 0.5 * _h(dob),
-            width,
-            height,
-        )
-    else:
-        window = _clip(0.2 * width, 0.55 * height, 0.95 * width, height, width, height)
+    window, _ = _dob_footer_window(blocks, width, height)
     return find_white_box(image_bgr, window)
+
+
+def _band_roi(blocks, width, height) -> BBox | None:
+    """Type 1 fallback when the white box itself can't be segmented (pale or
+    washed-out photo): the box always sits between Date of Birth and the
+    footer, so use that band, tightened to any OCR block inside it."""
+    window, bounded = _dob_footer_window(blocks, width, height)
+    if not bounded or _dob_block(blocks) is None:
+        return None
+    inside = [
+        b
+        for b in blocks
+        if b.get("type") in ("text", "image")
+        and not _FOOTER.search(_content(b))
+        and b["x0"] >= window.x0 - 5
+        and b["x1"] <= window.x1 + 5
+        and b["y0"] >= window.y0 - 5
+        and b["y1"] <= window.y1 + 5
+    ]
+    if not inside:
+        return window
+    x0, y0 = min(b["x0"] for b in inside), min(b["y0"] for b in inside)
+    x1, y1 = max(b["x1"] for b in inside), max(b["y1"] for b in inside)
+    pad_x, pad_y = 0.15 * (x1 - x0), 0.25 * (y1 - y0)
+    return _clip(
+        max(window.x0, x0 - pad_x), max(window.y0, y0 - pad_y),
+        min(window.x1, x1 + pad_x), min(window.y1, y1 + pad_y), width, height,
+    )
+
+
+def _intersect(a: BBox, b: BBox) -> BBox | None:
+    box = BBox(max(a.x0, b.x0), max(a.y0, b.y0), min(a.x1, b.x1), min(a.y1, b.y1))
+    return box if box.x1 > box.x0 and box.y1 > box.y0 else None
+
+
+def _area(b: BBox) -> int:
+    return max(0, b.x1 - b.x0) * max(0, b.y1 - b.y0)
+
+
+def _handwriting_in(window: BBox, box: BBox | None, blocks, width, height) -> BBox | None:
+    """Region of the handwriting in a Type 1 box, from Mistral's blocks.
+
+    Blocks are looked for inside `window` (the band between Date of Birth
+    and the footer, which is stable), not inside the detected `box`, which
+    can come out partial on pale photos. Mistral's own `signature`-typed
+    block is used when it exists; otherwise the text/image block(s) in the
+    window (usually the signature read as a name, or as an image). The union
+    is padded generously, since OCR block boxes are often tighter than the
+    ink, then limited to the window and, when the detected box really does
+    contain the handwriting, to that box so nothing outside it leaks in.
+    """
+    def clipped(b):
+        return _clip(b["x0"], b["y0"], b["x1"], b["y1"], width, height)
+
+    typed = [
+        b for b in blocks
+        if _is_signature_typed(b) and not _is_caption(b) and _intersect(window, clipped(b))
+    ]
+    if typed:
+        chosen = [max(typed, key=lambda b: _w(b) * _h(b))]
+    else:
+        chosen = []
+        for b in blocks:
+            if b.get("type") not in ("text", "image") or _FOOTER.search(_content(b)):
+                continue
+            if _DOB.search(_content(b)):
+                continue
+            c = clipped(b)
+            inter = _intersect(window, c)
+            if _area(c) > 0 and inter and _area(inter) >= 0.6 * _area(c):
+                chosen.append(b)
+    if not chosen:
+        return None
+
+    x0, y0 = min(b["x0"] for b in chosen), min(b["y0"] for b in chosen)
+    x1, y1 = max(b["x1"] for b in chosen), max(b["y1"] for b in chosen)
+    ink = _clip(x0, y0, x1, y1, width, height)
+    pad_x, pad_y = 0.4 * (x1 - x0), 0.35 * (y1 - y0)
+    roi = _intersect(_clip(x0 - pad_x, y0 - pad_y, x1 + pad_x, y1 + pad_y, width, height), window)
+    if roi is None:
+        return None
+    if box is not None:
+        inside = _intersect(box, ink)
+        if inside is not None and _area(inside) >= 0.9 * _area(ink):
+            roi = _intersect(roi, box) or roi
+    return roi
 
 
 def _right_of_dob_roi(blocks, width, height) -> BBox | None:
@@ -169,6 +271,9 @@ def _right_of_dob_roi(blocks, width, height) -> BBox | None:
         for b in blocks
         if b is not dob
         and b.get("type") == "text"
+        and not _FOOTER.search(_content(b))
+        and not _SERIAL.match(_content(b).strip())
+        and _h(b) <= 2 * _w(b)  # not a vertical printed date at the card edge
         and b["x0"] >= dob["x1"] - 0.05 * _w(dob)
         and min(b["y1"], dob["y1"]) - max(b["y0"], dob["y0"]) > 0.3 * min(_h(b), _h(dob))
     ]
@@ -179,6 +284,9 @@ def _right_of_dob_roi(blocks, width, height) -> BBox | None:
 
     band_h = _h(dob)
     y0, y1 = dob["y0"] - 0.5 * band_h, dob["y1"] + 0.25 * band_h
+    for other in blocks:
+        if _FOOTER.search(_content(other)) and other["y0"] > dob["y0"]:
+            y1 = min(y1, other["y0"] - 2)
     x1 = float(width)
     for other in blocks:
         if (other.get("type") or "") in ("image", "footer"):
@@ -202,9 +310,18 @@ def locate(
     if not captions or has_footer:
         box = _white_box_roi(image_bgr, blocks, has_footer)
         if box is not None:
-            return Located(box, TYPE1)
+            window, _ = _dob_footer_window(blocks, width, height)
+            return Located(_handwriting_in(window, box, blocks, width, height) or box, TYPE1)
+        if has_footer and not captions:
+            window, bounded = _dob_footer_window(blocks, width, height)
+            band = _band_roi(blocks, width, height)
+            if band is not None:
+                return Located(_handwriting_in(window, None, blocks, width, height) or band, TYPE1_BAND)
 
-    typed = [b for b in blocks if _is_signature_typed(b)]
+    # A typed block whose text is the caption itself spans handwriting AND
+    # caption; it is handled as a merged caption block below, so the
+    # caption is cut off by position instead of ending up in the output.
+    typed = [b for b in blocks if _is_signature_typed(b) and not _is_caption(b)]
     if typed:
         b = max(typed, key=lambda b: b["y0"])
         return Located(_clip(b["x0"], b["y0"], b["x1"], b["y1"], width, height), TYPED)

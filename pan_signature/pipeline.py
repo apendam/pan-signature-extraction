@@ -134,6 +134,8 @@ class SignatureResult:
     crop: np.ndarray | None = None
     bbox: BBox | None = None  # in the upright (rotated) image's coordinates
     roi: BBox | None = None
+    upright: np.ndarray | None = None  # the card rotated upright, for review images
+    ink_fraction: float | None = None  # share of black pixels in the final crop
 
 
 def normalize_blocks(ocr_response, width: int, height: int) -> list[dict]:
@@ -170,8 +172,8 @@ def normalize_blocks(ocr_response, width: int, height: int) -> list[dict]:
     return blocks
 
 
-def _flag(pan_type, rotation, reason, roi=None) -> SignatureResult:
-    return SignatureResult(NOT_READABLE, pan_type, rotation, reason, roi=roi)
+def _flag(pan_type, rotation, reason, roi=None, upright=None) -> SignatureResult:
+    return SignatureResult(NOT_READABLE, pan_type, rotation, reason, roi=roi, upright=upright)
 
 
 def _call_ocr(client, image_bgr, path: Path):
@@ -204,7 +206,10 @@ def extract_signature_report(
     it instead of saving a wrong crop.
     """
     path = Path(image_path)
-    image = cv2.imread(str(path))
+    # Mistral reads the file's raw pixels, ignoring any EXIF orientation tag,
+    # so its block coordinates are in that frame. OpenCV would apply the tag
+    # by default and every box would land in the wrong place.
+    image = cv2.imread(str(path), cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
     if image is None:
         return _flag("unknown", None, "image could not be decoded")
 
@@ -232,9 +237,9 @@ def extract_signature_report(
     roi = located.roi
     uh, uw = upright.shape[:2]
     if (roi.x1 - roi.x0) * (roi.y1 - roi.y0) > _MAX_ROI_AREA_FRACTION * uw * uh:
-        return _flag(located.pan_type, rotation, "could not isolate a signature region", roi)
+        return _flag(located.pan_type, rotation, "could not isolate a signature region", roi, upright)
     if located.pan_type == pan_locator.DEFAULT:
-        return _flag(located.pan_type, rotation, "no caption, white box or signature block found", roi)
+        return _flag(located.pan_type, rotation, "no caption, white box or signature block found", roi, upright)
 
     # The ROI already excludes the caption by position, so colour filtering
     # (which would erase blue-pen signatures) is turned off; ink is picked
@@ -251,10 +256,14 @@ def extract_signature_report(
     final = binarize(crop, config) if config.black_and_white else crop
     ink = float((final == 0).all(axis=2).mean()) if config.black_and_white else 1.0
     if config.black_and_white and ink < _MIN_INK_FRACTION:
-        return _flag(located.pan_type, rotation, "no legible signature (blank or too faint)", roi)
+        result = _flag(located.pan_type, rotation, "no legible signature (blank or too faint)", roi, upright)
+        result.ink_fraction = ink
+        return result
     if config.black_and_white and ink > _MAX_INK_FRACTION:
-        return _flag(located.pan_type, rotation, "region is mostly texture/text, not a signature", roi)
+        result = _flag(located.pan_type, rotation, "region is mostly texture/text, not a signature", roi, upright)
+        result.ink_fraction = ink
+        return result
 
     if config.orient_horizontal:
         final = orient_horizontal(final, config.rotate_direction)
-    return SignatureResult(OK, located.pan_type, rotation, "", final, bbox, roi)
+    return SignatureResult(OK, located.pan_type, rotation, "", final, bbox, roi, upright, ink)
