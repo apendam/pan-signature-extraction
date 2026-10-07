@@ -158,7 +158,7 @@ def test_binarize_bridges_a_faint_gap_in_a_stroke():
     # like on a low-res card) should come out as ONE connected stroke.
     crop = np.full((50, 200, 3), 235, dtype=np.uint8)
     cv2.line(crop, (10, 25), (80, 25), (20, 20, 20), 3)
-    cv2.line(crop, (80, 25), (120, 25), (100, 100, 100), 3)  # ink-like but weaker middle
+    cv2.line(crop, (80, 25), (120, 25), (114, 114, 114), 3)  # ink-like but weaker middle
     cv2.line(crop, (120, 25), (190, 25), (20, 20, 20), 3)
 
     def strokes(config):
@@ -166,7 +166,7 @@ def test_binarize_bridges_a_faint_gap_in_a_stroke():
         n, _ = cv2.connectedComponents((out[:, :, 0] == 0).astype(np.uint8))
         return n - 1
 
-    base = ExtractorConfig(exclude_blue_ink=False, binarize_smooth=False)
+    base = ExtractorConfig(exclude_blue_ink=False, binarize_smooth=False, binarize_thin_px=0)
     # Without hysteresis (weak cut-off == strong cut-off) the weak middle
     # is dropped and the stroke breaks in two; with it, the stroke holds.
     assert strokes(replace(base, binarize_weak_cutoff=base.binarize_strictness)) == 2
@@ -182,3 +182,37 @@ def test_binarize_drops_isolated_specks():
 
     scale = out.shape[0] // crop.shape[0]
     assert (out[: 12 * scale, : 12 * scale] == 255).all()
+
+
+def _line_thickness(out):
+    ink = out[:, :, 0] == 0
+    return ink.sum(axis=0)[ink.sum(axis=0) > 0].mean()  # mean ink pixels per ink column
+
+
+def test_thinning_makes_strokes_thinner_but_keeps_them_connected():
+    crop = np.full((60, 200, 3), 235, dtype=np.uint8)
+    cv2.line(crop, (10, 30), (190, 30), (20, 20, 20), 5)
+
+    base = ExtractorConfig(exclude_blue_ink=False, binarize_thin_px=0)
+    thin = ExtractorConfig(exclude_blue_ink=False, binarize_thin_px=0.8)
+
+    thick_out, thin_out = binarize(crop, base), binarize(crop, thin)
+    n, _ = cv2.connectedComponents((thin_out[:, :, 0] == 0).astype(np.uint8))
+
+    assert _line_thickness(thin_out) < 0.8 * _line_thickness(thick_out)
+    assert n - 1 == 1  # still one unbroken stroke
+
+
+def test_hollow_centre_of_a_marker_stroke_is_filled_but_a_real_loop_is_kept():
+    crop = np.full((120, 260, 3), 235, dtype=np.uint8)
+    cv2.line(crop, (10, 30), (120, 30), (20, 20, 20), 9)  # thick stroke...
+    cv2.line(crop, (10, 30), (120, 30), (200, 200, 200), 1)  # ...with a pale centre line
+    cv2.circle(crop, (200, 70), 22, (20, 20, 20), 3)  # a genuine open loop (letter 'o')
+
+    out = binarize(crop, ExtractorConfig(exclude_blue_ink=False))
+
+    scale = out.shape[0] // crop.shape[0]
+    stroke = out[: 50 * scale, : 130 * scale, 0] == 0
+    loop_inside = out[70 * scale, 200 * scale, 0]
+    assert stroke[30 * scale, 60 * scale]  # the pale centre line did not leave a hole
+    assert loop_inside == 255  # the loop's interior is still open

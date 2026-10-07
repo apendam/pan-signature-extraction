@@ -106,6 +106,45 @@ def whiten_background(
     return np.where(mask_3ch > 0, crop_bgr, white)
 
 
+def _skeleton(mask: np.ndarray) -> np.ndarray:
+    """Morphological skeleton (Lantuejoul): the centre lines of the strokes."""
+    element = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+    skeleton = np.zeros_like(mask)
+    work = mask.copy()
+    while cv2.countNonZero(work):
+        eroded = cv2.erode(work, element)
+        skeleton |= cv2.subtract(work, cv2.dilate(eroded, element))
+        work = eroded
+    return skeleton
+
+
+def _fill_small_holes(mask: np.ndarray, max_area: float, max_width: float) -> np.ndarray:
+    """Fill interior holes that are tiny (area) or narrow slits (minimum
+    width, however long); real letter loops are both larger and wider."""
+    contours, hierarchy = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    if hierarchy is None:
+        return mask
+    out = mask.copy()
+    for contour, info in zip(contours, hierarchy[0]):
+        if info[3] == -1:  # an outer outline, not a hole
+            continue
+        narrow = min(cv2.minAreaRect(contour)[1]) < max_width
+        if narrow or cv2.contourArea(contour) < max_area:
+            cv2.drawContours(out, [contour], -1, 255, -1)
+    return out
+
+
+def _thin_strokes(mask: np.ndarray, amount_px: float) -> np.ndarray:
+    """Shave `amount_px` off each side of every stroke. Strokes thinner than
+    that would vanish, so their skeleton is added back to keep them
+    connected; edges are then re-smoothed."""
+    k = max(1, round(amount_px))
+    eroded = cv2.erode(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * k + 1, 2 * k + 1)))
+    centre = cv2.dilate(_skeleton(mask), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+    thinned = eroded | centre
+    return ((cv2.GaussianBlur(thinned, (0, 0), sigmaX=0.8) > 120) * 255).astype(np.uint8)
+
+
 def binarize(
     crop_bgr: np.ndarray, config: ExtractorConfig = ExtractorConfig()
 ) -> np.ndarray:
@@ -121,7 +160,8 @@ def binarize(
       3. Hysteresis: keep weak ink pixels only where they are connected to
          strong ink, which bridges broken strokes without admitting
          lighter blue fringe or card texture that touches no real stroke.
-      4. Close 1px gaps, smooth edges, drop tiny isolated specks.
+      4. Close 1px gaps, smooth edges, fill hairline holes inside strokes,
+         thin the strokes for crisper lines, drop tiny isolated specks.
     No-op on an empty crop.
     """
     if crop_bgr.size == 0:
@@ -130,7 +170,7 @@ def binarize(
     if config.binarize_denoise:
         crop_bgr = cv2.fastNlMeansDenoisingColored(crop_bgr, None, 3, 3, 5, 15)
     long_side = max(crop_bgr.shape[:2])
-    scale = int(np.clip(round(config.binarize_target_long_side / long_side), 1, 4))
+    scale = int(np.clip(round(config.binarize_target_long_side / long_side), 1, 8))
     if scale > 1:
         crop_bgr = cv2.resize(
             crop_bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_LANCZOS4
@@ -173,6 +213,13 @@ def binarize(
         )
         sigma = 0.6 * scale / 2 + 0.4
         mask = ((cv2.GaussianBlur(mask, (0, 0), sigmaX=sigma) > 110) * 255).astype(np.uint8)
+
+    if config.binarize_fill_holes_px > 0:
+        mask = _fill_small_holes(
+            mask, config.binarize_fill_holes_px * scale * scale, config.binarize_fill_slit_px * scale
+        )
+    if config.binarize_thin_px > 0:
+        mask = _thin_strokes(mask, config.binarize_thin_px * scale)
 
     if config.binarize_min_speck_px > 0:
         n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)

@@ -74,8 +74,8 @@ class ExtractorConfig:
     # Small crops are upscaled (cubic) before thresholding so thin strokes
     # on low-resolution cards stay separate instead of merging into
     # blobs. The scale is chosen to bring the long side near this many
-    # pixels, between 1x and 4x.
-    binarize_target_long_side: int = 800
+    # pixels, between 1x and 8x.
+    binarize_target_long_side: int = 1600
     # Hysteresis: besides the strong ink pixels (binarize_strictness), keep
     # weaker ink pixels that are connected to one of them. This repairs
     # broken/dashed strokes (the faint middle of a pen stroke) without
@@ -86,6 +86,17 @@ class ExtractorConfig:
     binarize_denoise: bool = True
     # Close 1px gaps and smooth jagged edges of the final mask.
     binarize_smooth: bool = True
+    # Thin the strokes by this many pixels per side (at the original crop's
+    # resolution) for crisper, finer lines; thin strokes are kept connected
+    # via their skeleton. 0 disables. Larger values give finer lines.
+    binarize_thin_px: float = 0.5
+    # Interior gaps smaller than this (original-resolution px^2) are filled
+    # before thinning: marker ink often has a lighter centre that would
+    # otherwise turn into a hollow outline. Real letter loops are larger.
+    binarize_fill_holes_px: int = 60
+    # ...and so are narrow slits (min width below this, in original-resolution
+    # px), whatever their length.
+    binarize_fill_slit_px: float = 3.0
     # Drop isolated specks smaller than this many pixels (measured at the
     # original crop's resolution, before upscaling).
     binarize_min_speck_px: int = 6
